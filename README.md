@@ -1,3 +1,9 @@
+> [!WARNING]
+> 🚧 **TRAILER / UNDER ACTIVE DEVELOPMENT** 🚧  
+> *PowerDo is currently a work-in-progress project by **glastfin**. Features, syntax, and behaviors are subject to change as development evolves.*
+
+---
+
 # PowerDo
 
 **Glastfin Edition** — a full-screen, keyboard-driven todo manager for your terminal.
@@ -57,8 +63,6 @@ The installer asks a question at each step:
 7. registers the `powerdo` PowerShell profile alias
 8. optionally adds `powerdo.cmd` + your folder to user PATH (works in PowerShell 7, Windows PowerShell and cmd)
 9. optionally whitelists the folder in Defender / adds a desktop shortcut
-
-Nothing is obfuscated — plain scripts, plain launchers.
 
 ## Usage
 
