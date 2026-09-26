@@ -1,0 +1,6 @@
+# old json-based predecessor, not part of the release
+powerdo.ps1
+
+# local data / scratch
+*.log
+*.bak
