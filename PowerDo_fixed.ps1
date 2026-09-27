@@ -198,6 +198,29 @@ function Get-TaskDue      { param($Task) if ($Task.Description -match '(?<=^|\s)
 # --------------------------------------------------------------------------
 #  FUZZY DATES - natural phrases -> DateTime                       GlaStFiN
 # --------------------------------------------------------------------------
+function ConvertTo-TimeOfDay {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $t = $Text.Trim().ToLowerInvariant()
+    if ($t -eq 'noon')     { return [timespan]::FromHours(12) }
+    if ($t -eq 'midnight') { return [timespan]::Zero }
+    $ampm = $null
+    if ($t -match '^(.+?)\s*(a\.?m\.?|p\.?m\.?)$') { $t = $Matches[1].Trim(); $ampm = $Matches[2][0] }
+    $h = 0; $min = 0
+    if     ($t -match '^(\d{1,2}):(\d{2})$') { $h = [int]$Matches[1]; $min = [int]$Matches[2] }
+    elseif ($t -match '^(\d{1,2})$')         { $h = [int]$Matches[1] }
+    else { return $null }
+    if ($min -gt 59) { return $null }
+    if ($ampm) {
+        if ($h -lt 1 -or $h -gt 12) { return $null }
+        if ($ampm -eq 'p' -and $h -ne 12) { $h += 12 }
+        if ($ampm -eq 'a' -and $h -eq 12) { $h = 0 }
+    } elseif ($h -gt 23) { return $null }
+    return [timespan]::FromHours($h).Add([timespan]::FromMinutes($min))
+}
+
+function Format-DueDisplay { param([string]$Due) if (-not $Due) { return $Due }; return $Due.Replace('T', ' ') }
+
 function ConvertFrom-FuzzyDate {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
@@ -209,48 +232,71 @@ function ConvertFrom-FuzzyDate {
     $mo = @{ jan=1;january=1;feb=2;february=2;mar=3;march=3;apr=4;april=4;may=5;jun=6;june=6;jul=7;july=7;aug=8;august=8;sep=9;sept=9;september=9;oct=10;october=10;nov=11;november=11;dec=12;december=12 }
     $wdPat = '(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:s(?:nesday)?)?|thu(?:rs?(?:day)?)?|fri(?:day)?|sat(?:urday)?)'
 
+    # -- extract a time-of-day spec, resolve the date, re-apply the time -----
+    $tod = $null
+    if     ($s -match '^(?:at\s+)?(\d{1,2}:\d{2}\s*(?:am|pm)?|\d{1,2}\s*(?:am|pm)|noon|midnight)$') { $tod = $Matches[1]; $s = 'today' }
+    elseif ($s -match '^at\s+(\d{1,2})$') {
+        $n = [int]$Matches[1]
+        if ($n -ge 1 -and $n -le 11) { $n += 12 }   # bare hour via 'at' => pm
+        $tod = "${n}:00"; $s = 'today'
+    }
+    elseif ($s -match '^(.*\S)\s+(?:at\s+)?(\d{1,2}:\d{2}\s*(?:am|pm)?)$')  { $tod = $Matches[2]; $s = $Matches[1] }
+    elseif ($s -match '^(.*\S)\s+(?:at\s+)?(\d{1,2}\s*(?:am|pm))$')         { $tod = $Matches[2]; $s = $Matches[1] }
+    elseif ($s -match '^(.*\S)\s+(?:at\s+)?(noon|midnight)$')               { $tod = $Matches[2]; $s = $Matches[1] }
+    elseif ($s -match '^(.*\S)\s+at\s+(\d{1,2})$') {
+        $n = [int]$Matches[2]
+        if ($n -ge 1 -and $n -le 11) { $n += 12 }   # bare hour via 'at' => pm
+        $tod = "${n}:00"; $s = $Matches[1]
+    }
+
+    $r = $null
     switch -Regex ($s) {
-        '^(?:today|tod|tonight|eod)$'              { return $today }
-        '^(?:tomorrow|tom|tmr|tmw)$'               { return $today.AddDays(1) }
-        '^yesterday$'                              { return $today.AddDays(-1) }
-        '^weekend$'                                { return $today.AddDays((6 - [int]$today.DayOfWeek + 7) % 7) }
-        '^(?:eow|end of (?:the )?week|this week)$' { return $today.AddDays((0 - [int]$today.DayOfWeek + 7) % 7) }
-        '^next week$'                              { return $today.AddDays(7) }
-        '^(?:eom|end of (?:the )?month)$'          { return [datetime]::new($today.Year, $today.Month, [datetime]::DaysInMonth($today.Year, $today.Month)) }
+        '^(?:today|tod|tonight|eod)$'              { $r = $today; break }
+        '^(?:tomorrow|tom|tmr|tmw)$'               { $r = $today.AddDays(1); break }
+        '^yesterday$'                              { $r = $today.AddDays(-1); break }
+        '^weekend$'                                { $r = $today.AddDays((6 - [int]$today.DayOfWeek + 7) % 7); break }
+        '^(?:eow|end of (?:the )?week|this week)$' { $r = $today.AddDays((0 - [int]$today.DayOfWeek + 7) % 7); break }
+        '^next week$'                              { $r = $today.AddDays(7); break }
+        '^(?:eom|end of (?:the )?month)$'          { $r = [datetime]::new($today.Year, $today.Month, [datetime]::DaysInMonth($today.Year, $today.Month)); break }
         '^next month$' {
             $y = $today.Year; $m = $today.Month + 1
             if ($m -gt 12) { $m = 1; $y++ }
-            return [datetime]::new($y, $m, [Math]::Min($today.Day, [datetime]::DaysInMonth($y, $m)))
+            $r = [datetime]::new($y, $m, [Math]::Min($today.Day, [datetime]::DaysInMonth($y, $m))); break
         }
-        '^(?:eoy|end of (?:the )?year)$'           { return [datetime]::new($today.Year, 12, 31) }
+        '^(?:eoy|end of (?:the )?year)$'           { $r = [datetime]::new($today.Year, 12, 31); break }
         '^next year$' {
             $y = $today.Year + 1
-            return [datetime]::new($y, $today.Month, [Math]::Min($today.Day, [datetime]::DaysInMonth($y, $today.Month)))
+            $r = [datetime]::new($y, $today.Month, [Math]::Min($today.Day, [datetime]::DaysInMonth($y, $today.Month))); break
+        }
+        '^(?:(?:in|next)\s+)?(\d+)\s*(h|hr|hrs|hour|hours|min|mins|minute|minutes)$' {
+            $n = [int]$Matches[1]; $u = $Matches[2]; $now = Get-Date
+            if ($u -match '^(?:h|hr|hrs|hour|hours)$') { $r = $now.AddHours($n) } else { $r = $now.AddMinutes($n) }
+            break
         }
         '^(?:(?:in|next)\s+)?(\d+)\s*(day|days|d|week|weeks|w|month|months|mo|year|years|y)$' {
             $n = [int]$Matches[1]; $u = $Matches[2]
-            if ($u -match '^(?:d|day|days)$') { return $today.AddDays($n) }
-            if ($u -match '^(?:w|week|weeks)$') { return $today.AddDays($n * 7) }
+            if ($u -match '^(?:d|day|days)$') { $r = $today.AddDays($n); break }
+            if ($u -match '^(?:w|week|weeks)$') { $r = $today.AddDays($n * 7); break }
             if ($u -match '^(?:mo|month|months)$') {
                 $m = $today.Month + $n
                 $y = $today.Year + [int][Math]::Floor(($m - 1) / 12)
                 $m = (($m - 1) % 12) + 1
-                return [datetime]::new($y, $m, [Math]::Min($today.Day, [datetime]::DaysInMonth($y, $m)))
+                $r = [datetime]::new($y, $m, [Math]::Min($today.Day, [datetime]::DaysInMonth($y, $m))); break
             }
             $y = $today.Year + $n
-            return [datetime]::new($y, $today.Month, [Math]::Min($today.Day, [datetime]::DaysInMonth($y, $today.Month)))
+            $r = [datetime]::new($y, $today.Month, [Math]::Min($today.Day, [datetime]::DaysInMonth($y, $today.Month))); break
         }
         "^(next|this)\s+($wdPat)$" {
             $target = [int]$wd[$Matches[2]]
             $next = $today.AddDays(($target - [int]$today.DayOfWeek + 7) % 7)
             if ($Matches[1] -eq 'next' -and $next -eq $today) { $next = $next.AddDays(7) }
-            return $next
+            $r = $next; break
         }
-        "^($wdPat)$" { return $today.AddDays(([int]$wd[$Matches[1]] - [int]$today.DayOfWeek + 7) % 7) }
+        "^($wdPat)$" { $r = $today.AddDays(([int]$wd[$Matches[1]] - [int]$today.DayOfWeek + 7) % 7); break }
         '^(\d{4})-(\d{1,2})-(\d{1,2})$' {
             $y = [int]$Matches[1]; $m = [int]$Matches[2]; $d = [int]$Matches[3]
-            if ($m -ge 1 -and $m -le 12 -and $d -ge 1 -and $d -le [datetime]::DaysInMonth($y, $m)) { return [datetime]::new($y, $m, $d) }
-            return $null
+            if ($m -ge 1 -and $m -le 12 -and $d -ge 1 -and $d -le [datetime]::DaysInMonth($y, $m)) { $r = [datetime]::new($y, $m, $d) }
+            break
         }
         '^(\d{1,2})[\/\.](\d{1,2})(?:[\/\.](\d{2,4}))?$' {
             $a = [int]$Matches[1]; $b = [int]$Matches[2]
@@ -258,69 +304,108 @@ function ConvertFrom-FuzzyDate {
             if     ($a -gt 12 -and $b -le 12) { $d = $a; $m = $b }
             elseif ($b -gt 12 -and $a -le 12) { $m = $a; $d = $b }
             elseif ($a -le 12 -and $b -le 12) { $m = $a; $d = $b }
-            else { return $null }
+            else { break }
             $y = $today.Year; $hasYear = [bool]$Matches[3]
             if ($hasYear) { $y = [int]$Matches[3]; if ($y -lt 100) { $y += 2000 } }
-            if ($m -lt 1 -or $m -gt 12 -or $d -lt 1 -or $d -gt [datetime]::DaysInMonth($y, $m)) { return $null }
-            $r = [datetime]::new($y, $m, $d)
-            if (-not $hasYear -and $r -lt $today) { $r = $r.AddYears(1) }
-            return $r
+            if ($m -lt 1 -or $m -gt 12 -or $d -lt 1 -or $d -gt [datetime]::DaysInMonth($y, $m)) { break }
+            $rr = [datetime]::new($y, $m, $d)
+            if (-not $hasYear -and $rr -lt $today) { $rr = $rr.AddYears(1) }
+            $r = $rr; break
         }
         '^(\d{1,2})\s+([a-z]+)(?:\s+(\d{4}))?$' {
-            if (-not $mo.ContainsKey($Matches[2])) { return $null }
+            if (-not $mo.ContainsKey($Matches[2])) { break }
             $m = [int]$mo[$Matches[2]]; $d = [int]$Matches[1]
             $y = $today.Year; $hasYear = [bool]$Matches[3]
             if ($hasYear) { $y = [int]$Matches[3] }
-            if ($d -lt 1 -or $d -gt [datetime]::DaysInMonth($y, $m)) { return $null }
-            $r = [datetime]::new($y, $m, $d)
-            if (-not $hasYear -and $r -lt $today) { $r = $r.AddYears(1) }
-            return $r
+            if ($d -lt 1 -or $d -gt [datetime]::DaysInMonth($y, $m)) { break }
+            $rr = [datetime]::new($y, $m, $d)
+            if (-not $hasYear -and $rr -lt $today) { $rr = $rr.AddYears(1) }
+            $r = $rr; break
         }
         '^([a-z]+)\s+(\d{1,2})(?:\s+(\d{4}))?$' {
-            if (-not $mo.ContainsKey($Matches[1])) { return $null }
+            if (-not $mo.ContainsKey($Matches[1])) { break }
             $m = [int]$mo[$Matches[1]]; $d = [int]$Matches[2]
             $y = $today.Year; $hasYear = [bool]$Matches[3]
             if ($hasYear) { $y = [int]$Matches[3] }
-            if ($d -lt 1 -or $d -gt [datetime]::DaysInMonth($y, $m)) { return $null }
-            $r = [datetime]::new($y, $m, $d)
-            if (-not $hasYear -and $r -lt $today) { $r = $r.AddYears(1) }
-            return $r
+            if ($d -lt 1 -or $d -gt [datetime]::DaysInMonth($y, $m)) { break }
+            $rr = [datetime]::new($y, $m, $d)
+            if (-not $hasYear -and $rr -lt $today) { $rr = $rr.AddYears(1) }
+            $r = $rr; break
         }
         '^(\d{1,2})$' {
             $d = [int]$Matches[1]
-            if ($d -lt 1) { return $null }
+            if ($d -lt 1) { break }
             if ($d -le [datetime]::DaysInMonth($today.Year, $today.Month)) {
-                $r = [datetime]::new($today.Year, $today.Month, $d)
-                if ($r -ge $today) { return $r }
+                $rr = [datetime]::new($today.Year, $today.Month, $d)
+                if ($rr -ge $today) { $r = $rr; break }
             }
             $y = $today.Year; $m = $today.Month + 1
             if ($m -gt 12) { $m = 1; $y++ }
-            if ($d -le [datetime]::DaysInMonth($y, $m)) { return [datetime]::new($y, $m, $d) }
-            return $null
+            if ($d -le [datetime]::DaysInMonth($y, $m)) { $r = [datetime]::new($y, $m, $d) }
+            break
         }
     }
-    return $null
+    if ($r -and $tod) {
+        $ts = ConvertTo-TimeOfDay $tod
+        if ($ts) { $r = $r.Date.Add($ts) }
+    }
+    return $r
 }
 
 function Get-DueLabel {
     param([string]$Due)
     if ([string]::IsNullOrWhiteSpace($Due)) { return $null }
-    $d = $null
-    try { $d = [datetime]::ParseExact($Due, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture).Date } catch { return $null }
-    $diff = ($d - (Get-Date).Date).Days
-    if ($diff -lt 0) { $n = -$diff; return $(if ($n -eq 1) { 'overdue by 1 day' } else { "overdue by $n days" }) }
-    if ($diff -eq 0) { return 'today' }
-    if ($diff -eq 1) { return 'tomorrow' }
-    if ($diff -le 6) { return "in $diff days, $($d.ToString('ddd'))" }
+    $d = $null; $hasTime = $false
+    if ($Due -match '^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$') {
+        try {
+            $base = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+            $d = $base.AddHours([int]$Matches[2].Split(':')[0]).AddMinutes([int]$Matches[2].Split(':')[1])
+            $hasTime = $true
+        } catch { return $null }
+    } else {
+        try { $d = [datetime]::ParseExact($Due, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture).Date } catch { return $null }
+    }
+    $now = Get-Date
+    $diff = ($d.Date - $now.Date).Days
+    $at = if ($hasTime) { ' at ' + $d.ToString('HH:mm') } else { '' }
+    $overdue = if ($hasTime) { $d -lt $now } else { $diff -lt 0 }
+    if ($overdue) {
+        if ($hasTime -and $diff -eq 0) {
+            $span = $now - $d
+            if ($span.TotalHours -ge 1) { return "overdue by $([int][Math]::Floor($span.TotalHours))h $($span.Minutes)m" }
+            return "overdue by $($span.Minutes)m"
+        }
+        $n = -$diff; return $(if ($n -eq 1) { 'overdue by 1 day' } else { "overdue by $n days" })
+    }
+    if ($diff -eq 0) { return "today$at" }
+    if ($diff -eq 1) { return "tomorrow$at" }
+    if ($diff -le 6) { return "in $diff days, $($d.ToString('ddd'))$at" }
     return $null
 }
 
 function Get-DueColorInfo {
     param($Palette, [string]$Due, [bool]$Completed)
     if ([string]::IsNullOrWhiteSpace($Due) -or $Completed) { return @{ Fg = $Palette.Warning; Bold = $false } }
-    $d = $null
-    try { $d = [datetime]::ParseExact($Due, 'yyyy-MM-dd', $null).Date } catch { return @{ Fg = $Palette.Warning; Bold = $false } }
-    $diff = ($d - (Get-Date).Date).Days
+    $d = $null; $hasTime = $false
+    if ($Due -match '^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$') {
+        try {
+            $base = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd', $null)
+            $d = $base.AddHours([int]$Matches[2].Split(':')[0]).AddMinutes([int]$Matches[2].Split(':')[1])
+            $hasTime = $true
+        } catch { return @{ Fg = $Palette.Warning; Bold = $false } }
+    } else {
+        try { $d = [datetime]::ParseExact($Due, 'yyyy-MM-dd', $null).Date } catch { return @{ Fg = $Palette.Warning; Bold = $false } }
+    }
+    $now = Get-Date
+    if ($hasTime) {
+        if ($d -lt $now)                          { return @{ Fg = $Palette.Danger;  Bold = $true } }
+        if ($d -lt $now.AddHours(1))              { return @{ Fg = $Palette.Warning; Bold = $true } }
+        if ($d.Date -eq $now.Date)                { return @{ Fg = $Palette.Warning; Bold = $true } }
+        if (($d.Date - $now.Date).Days -eq 1)     { return @{ Fg = $Palette.Warning; Bold = $true } }
+        if (($d.Date - $now.Date).Days -le 6)     { return @{ Fg = $Palette.Warning; Bold = $false } }
+        return @{ Fg = $Palette.Warning; Bold = $false }
+    }
+    $diff = ($d - $now.Date).Days
     if ($diff -lt 0)     { return @{ Fg = $Palette.Danger;  Bold = $true } }
     if ($diff -le 1)     { return @{ Fg = $Palette.Warning; Bold = $true } }
     return @{ Fg = $Palette.Warning; Bold = $false }
@@ -331,7 +416,8 @@ function Apply-TaskDue {
     $t = $script:SelectedTask
     if (-not $t) { Set-Status 'No task selected.'; return $false }
     Push-Undo
-    $iso = $Date.ToString('yyyy-MM-dd')
+    $fmt = if ($Date.TimeOfDay -eq [timespan]::Zero) { 'yyyy-MM-dd' } else { 'yyyy-MM-ddTHH:mm' }
+    $iso = $Date.ToString($fmt)
     if ($t.Description -match '(?<=^|\s)due:\S+') {
         $t.Description = [regex]::Replace($t.Description, '(?<=^|\s)due:\S+', "due:$iso")
     } else {
@@ -339,7 +425,8 @@ function Apply-TaskDue {
     }
     Save-Tasks
     $label = Get-DueLabel $iso
-    Set-Status $(if ($label) { "Due set: $iso ($label)." } else { "Due set: $iso." })
+    $disp = Format-DueDisplay $iso
+    Set-Status $(if ($label) { "Due set: $disp ($label)." } else { "Due set: $disp." })
     return $true
 }
 
@@ -355,10 +442,14 @@ function Clear-TaskDue {
 function Normalize-DueTokens {
     param([string]$Text)
     if (-not $Text) { return $Text }
-    return [regex]::Replace($Text, '(?<=^|\s)due:(\S+)', {
+    $timeTok = '\d{1,2}:\d{2}\s*(?:am|pm)?|\d{1,2}\s*(?:am|pm)|noon|midnight'
+    return [regex]::Replace($Text, "(?<=^|\s)due:(\S+(?:\s+(?:$timeTok|\d{1,2}))*)", {
         param($m)
         $d = ConvertFrom-FuzzyDate -Text $m.Groups[1].Value.Replace('_', ' ')
-        if ($d) { 'due:' + $d.ToString('yyyy-MM-dd') } else { $m.Value }
+        if ($d) {
+            $fmt = if ($d.TimeOfDay -eq [timespan]::Zero) { 'yyyy-MM-dd' } else { 'yyyy-MM-ddTHH:mm' }
+            'due:' + $d.ToString($fmt)
+        } else { $m.Value }
     })
 }
 
@@ -708,7 +799,7 @@ function Confirm-TextInput {
                 $script:SelectedTask = $task
                 $dueNow = Get-TaskDue $task
                 $lbl = Get-DueLabel $dueNow
-                Set-Status $(if ($lbl) { "Task added. due $dueNow ($lbl)." } else { 'Task added.' })
+                Set-Status $(if ($lbl) { "Task added. due $(Format-DueDisplay $dueNow) ($lbl)." } else { 'Task added.' })
             }
         }
         'edit' {
@@ -1067,11 +1158,11 @@ function Build-DetailSidebarRows {
         $rows.Add(@{ Segments = @(@{ Text = "Priority: $(if ($t.Priority) { $t.Priority } else { '-' })"; Fg = $Palette.Text }) })
         $rows.Add(@{ Segments = @(@{ Text = "Created:  $(if ($t.CreationDate) { $t.CreationDate } else { '-' })"; Fg = $Palette.Text }) })
     $due = Get-TaskDue $t
-    $rows.Add(@{ Segments = @(@{ Text = "Due:      $(if ($due) { $due } else { '-' })"; Fg = $Palette.Text }) })
+    $rows.Add(@{ Segments = @(@{ Text = "Due:      $(if ($due) { Format-DueDisplay $due } else { '-' })"; Fg = $Palette.Text }) })
     $dueLbl = Get-DueLabel $due
     if ($dueLbl) {
         $lblFg = if ($dueLbl.StartsWith('overdue')) { $Palette.Danger }
-                 elseif ($dueLbl -in @('today', 'tomorrow')) { $Palette.Warning }
+                 elseif ($dueLbl.StartsWith('today') -or $dueLbl.StartsWith('tomorrow')) { $Palette.Warning }
                  else { $Palette.Muted }
         $rows.Add(@{ Segments = @(@{ Text = "  $dueLbl"; Fg = $lblFg }) })
     }
@@ -1218,7 +1309,7 @@ function Get-InputLine {
         'search'     { "  search: $($script:InputBuffer)_" }
         'addproject' { "  project (+): $($script:InputBuffer)_" }
         'addcontext' { "  context (@): $($script:InputBuffer)_" }
-        'setdue'     { "  due (fuzzy): $($script:InputBuffer)_   today / tmr / mon / eom / 30 / sep 15 / clear" }
+        'setdue'     { "  due (fuzzy): $($script:InputBuffer)_   today / tmr / eow / sep 15 / 5pm / 17:00 / in 2 hours / clear" }
         'filterpick' { "  $($script:FilterPickerBy) filter -- j/k cycle, Esc clear, any key confirms" }
         default      { " >  ?: help   ,: settings   T: theme   D: density   q: quit" }
     }
@@ -1270,7 +1361,7 @@ function Render-Frame {
             'NAVIGATION   j/k move . gg top . G bottom . Ctrl-d/u half page'
             'EDITING      n add . e/i edit . x complete . dd delete . p priority'
             'TAGS         c context . + project . u undo (50 levels)'
-            'DUE          du fuzzy date prompt . dt today . dw +7 days . inline due:tomorrow'
+            'DUE          du fuzzy date prompt . dt today . dw +7 days . time: 5pm / 17:00 / in 2 hours . inline due:today 5pm'
             'FILTER/SORT  / search . fp filter project . fc filter context . S sort'
             'SELECTION    v visual mode . space select . x/dd bulk complete/delete'
             'VIEWS        l list . a archive (u un-archive, dd delete forever) . A archive done'
